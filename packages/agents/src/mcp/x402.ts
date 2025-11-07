@@ -22,7 +22,7 @@ import type {
 import type { ZodRawShape } from "zod";
 import { base, baseSepolia, type Chain } from "viem/chains";
 
-import { processPriceToAtomicAmount } from "x402/shared";
+import { processPriceToAtomicAmount, svm } from "x402/shared";
 import { exact } from "x402/schemes";
 import { useFacilitator } from "x402/verify";
 import type {
@@ -30,11 +30,13 @@ import type {
   Network,
   PaymentPayload,
   PaymentRequirements,
-  Wallet
+  Signer,
+  MultiNetworkSigner
 } from "x402/types";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import { createWalletClient, http, type Account } from "viem";
+import { createWalletClient, http, type Account, type Address } from "viem";
 import { createPaymentHeader } from "x402/client";
+import { type Address as SolanaAddress } from "@solana/kit";
 
 /*
   ======= SERVER SIDE =======
@@ -42,7 +44,7 @@ import { createPaymentHeader } from "x402/client";
 
 export type X402Config = {
   network: Network;
-  recipient: `0x${string}`;
+  recipient: Address | SolanaAddress;
   facilitator: FacilitatorConfig;
   version?: number;
 };
@@ -232,8 +234,8 @@ export interface X402AugmentedClient {
 }
 
 export type X402ClientConfig = {
-  network: Network; // we only support base and base-sepolia for now
-  account: Account;
+  network: Network;
+  account: Account | string; // Account for EVM, base58 private key string for Solana
   maxPaymentValue?: bigint;
   version?: number;
   confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>; // Confirmation callback for payment
@@ -244,11 +246,16 @@ export function withX402Client<T extends MCPClient>(
   x402Config: X402ClientConfig
 ): X402AugmentedClient & T {
   const { network, account, version } = x402Config;
-  const wallet = createWalletClient({
-    account,
-    transport: http(),
-    chain: toChain(network)
-  });
+  const walletPromise: Promise<Signer | MultiNetworkSigner> =
+    network === "solana" || network === "solana-devnet"
+      ? svm.createSignerFromBase58(account as string)
+      : Promise.resolve(
+          createWalletClient({
+            account: account as Account,
+            transport: http(),
+            chain: toChain(network)
+          }) as Signer
+        );
 
   const maxPaymentValue = x402Config.maxPaymentValue ?? BigInt(0.1 * 10 ** 6); // 0.10 USDC
 
@@ -338,11 +345,8 @@ export function withX402Client<T extends MCPClient>(
       }
 
       // Use x402/client to get the X-PAYMENT token
-      const token = await createPaymentHeader(
-        wallet as Wallet,
-        version ?? 1,
-        req
-      );
+      const wallet = await walletPromise;
+      const token = await createPaymentHeader(wallet, version ?? 1, req);
 
       // Call the tool with the payment token
       return _callTool(
